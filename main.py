@@ -50,6 +50,19 @@ class ProcessResponse(BaseModel):
     error: str | None = None
 
 
+class SummarizeRequest(BaseModel):
+    text: str
+    options: SummaryOptions
+    categories: list[str]
+
+
+class SummarizeResponse(BaseModel):
+    success: bool
+    category: str | None = None
+    summary: str | None = None
+    error: str | None = None
+
+
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -137,6 +150,17 @@ async def process(req: ProcessRequest) -> ProcessResponse:
         return ProcessResponse(success=True, text=text, title=title, image=image, error=str(e))
 
     return ProcessResponse(success=True, text=text, title=title, image=image, category=parsed["category"], summary=parsed["summary"])
+
+
+@app.post("/summarize", response_model=SummarizeResponse)
+async def summarize(req: SummarizeRequest) -> SummarizeResponse:
+    try:
+        system_prompt = build_summary_system_prompt(req.options, req.categories)
+        raw = await call_claude(system_prompt, req.text)
+        parsed = extract_json(raw, req.categories)
+        return SummarizeResponse(success=True, category=parsed["category"], summary=parsed["summary"])
+    except Exception as e:
+        return SummarizeResponse(success=False, error=str(e))
 
 
 @app.post("/chat")
