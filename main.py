@@ -1,11 +1,12 @@
 import json
 import os
+import time
 from datetime import datetime
 
 import httpx
 import trafilatura
 from dotenv import load_dotenv
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -30,6 +31,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{current_time}] ➡️ Request: {request.method} {request.url.path}", flush=True)
+    try:
+        response = await call_next(request)
+        process_time = (time.time() - start_time) * 1000
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{current_time}] ⬅️ Response: {request.method} {request.url.path} - Status: {response.status_code} ({process_time:.2f}ms)", flush=True)
+        return response
+    except Exception as e:
+        process_time = (time.time() - start_time) * 1000
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{current_time}] ❌ Response Error: {request.method} {request.url.path} - Error: {str(e)} ({process_time:.2f}ms)", flush=True)
+        raise e
+
 
 
 class SummaryOptions(BaseModel):
@@ -61,9 +81,10 @@ class ChatRequest(BaseModel):
 
 
 def get_supabase_headers():
+    key = SUPABASE_SERVICE_ROLE_KEY if SUPABASE_SERVICE_ROLE_KEY else SUPABASE_ANON_KEY
     return {
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
         "Prefer": "return=representation"
     }
@@ -175,9 +196,12 @@ async def call_claude(system_prompt: str, article: str) -> str:
 
 
 async def run_process_pipeline(content_id: int, url: str, options: SummaryOptions, categories: list[str]):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Pipeline:{content_id}] Starting pipeline for URL: {url}", flush=True)
     # 1. 크롤링
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Pipeline:{content_id}] Crawling URL...", flush=True)
     crawled = crawl_url(url)
     if not crawled["success"]:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Pipeline:{content_id}] ❌ Crawling failed.", flush=True)
         await update_supabase_content(content_id, {
             "tag": "Not Article",
             "data": {
@@ -190,8 +214,10 @@ async def run_process_pipeline(content_id: int, url: str, options: SummaryOption
     text = crawled["text"]
     title = crawled.get("title")
     image = crawled.get("image")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Pipeline:{content_id}] Successfully crawled. Title: '{title}', Text length: {len(text)} chars", flush=True)
 
     # DB stage update
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Pipeline:{content_id}] Updating status to 'Summarizing' in Supabase", flush=True)
     await update_supabase_content(content_id, {
         "data": {
             "processing": True,
@@ -205,10 +231,13 @@ async def run_process_pipeline(content_id: int, url: str, options: SummaryOption
     # 2. Claude 요약
     try:
         system_prompt = build_summary_system_prompt(options, categories)
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Pipeline:{content_id}] Requesting summary from Claude (model: {CLAUDE_MODEL})", flush=True)
         raw = await call_claude(system_prompt, text)
         parsed = extract_json(raw, categories)
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Pipeline:{content_id}] Claude response parsed successfully. Category: '{parsed['category']}'", flush=True)
         
         option_key = compute_option_key(options)
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Pipeline:{content_id}] Saving final summary under key '{option_key}' to Supabase", flush=True)
         await update_supabase_content(content_id, {
             "tag": "Article",
             "data": {
@@ -222,7 +251,9 @@ async def run_process_pipeline(content_id: int, url: str, options: SummaryOption
                 "processing": False
             }
         })
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Pipeline:{content_id}] Pipeline completed successfully", flush=True)
     except Exception as e:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [Pipeline:{content_id}] ❌ Pipeline failed: {str(e)}", flush=True)
         await update_supabase_content(content_id, {
             "tag": "Article",
             "data": {
@@ -237,8 +268,13 @@ async def run_process_pipeline(content_id: int, url: str, options: SummaryOption
 
 @app.post("/process", response_model=ProcessResponse)
 async def process(req: ProcessRequest, background_tasks: BackgroundTasks) -> ProcessResponse:
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [POST /process] Received URL: {req.url}", flush=True)
     try:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [POST /process] Inserting initial record into Supabase...", flush=True)
         content_id = await insert_supabase_content(req.url)
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [POST /process] Inserted successfully. content_id: {content_id}", flush=True)
+        
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [POST /process] Scheduling background pipeline task", flush=True)
         background_tasks.add_task(
             run_process_pipeline,
             content_id,
@@ -246,16 +282,24 @@ async def process(req: ProcessRequest, background_tasks: BackgroundTasks) -> Pro
             req.options,
             req.categories
         )
-        return ProcessResponse(success=True, id=content_id)
+        response = ProcessResponse(success=True, id=content_id)
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [POST /process] Returning response: {response.model_dump()}", flush=True)
+        return response
     except Exception as e:
-        return ProcessResponse(success=False, error=str(e))
+        response = ProcessResponse(success=False, error=str(e))
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [POST /process] ❌ Error occurred: {str(e)}. Returning: {response.model_dump()}", flush=True)
+        return response
 
 
 @app.post("/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [POST /chat] Received request. Messages count: {len(req.messages)}, Article length: {len(req.articleText)} chars", flush=True)
     system_prompt = build_chat_system_prompt(req.articleText)
 
     async def event_stream():
+        chunk_count = 0
+        total_bytes = 0
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [POST /chat] Starting Claude stream connection...", flush=True)
         async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
             async with client.stream(
                 "POST",
@@ -269,12 +313,19 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                     "stream": True,
                 },
             ) as response:
+                print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [POST /chat] Stream connected. Returning response generator.", flush=True)
                 async for chunk in response.aiter_bytes():
+                    chunk_count += 1
+                    total_bytes += len(chunk)
                     yield chunk
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [POST /chat] Stream finished. Yielded {chunk_count} chunks, total {total_bytes} bytes.", flush=True)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [GET /health] Health check requested", flush=True)
+    res = {"status": "ok"}
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [GET /health] Returning: {res}", flush=True)
+    return res
