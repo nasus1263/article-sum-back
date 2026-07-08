@@ -3,3 +3,5 @@ uvicorn
 trafilatura
 httpx
 python-dotenv
+lxml_html_clean
+playwright
