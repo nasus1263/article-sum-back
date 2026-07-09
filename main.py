@@ -138,7 +138,12 @@ def build_summary_system_prompt(options: SummaryOptions, categories: list[str]) 
         style_lines.append("Sprinkle in emojis that fit the content throughout the summary.")
     return f"""You are an AI that classifies and summarizes news articles.
 Classify the given article into exactly one of these categories: {', '.join(categories)}. The category value must exactly match one from this list.
-Then summarize the article in {LANGUAGE_NAMES[options.language]} in exactly 3 lines, each at most 100 characters. Format exactly as "1. ...\\n2. ...\\n3. ..." — a \\n only ever separates one numbered item from the next. Never insert a \\n inside a single numbered item (e.g. "1. xx\\nxxx\\n2. xxx" is forbidden); each item must stay on one line.
+Then summarize the article in {LANGUAGE_NAMES[options.language]} in exactly 3 lines, each at most 100 characters.
+You MUST format the summary exactly as:
+1. [item 1]
+2. [item 2]
+3. [item 3]
+You MUST insert a mandatory newline character (\\n) separating each numbered item (e.g., "1. xx\\n2. xx\\n3. xx"). A newline (\\n) must separate item 1 and item 2, and another newline (\\n) must separate item 2 and item 3. Do NOT write them continuously on a single line or separate them using spaces. A \\n only ever separates one numbered item from the next. Never insert a \\n inside a single numbered item; each item must stay on one line.
 {chr(10).join(style_lines)}
 Output only the JSON format below. No markdown, no explanations.
 {{ "category": "{categories[0]}", "summary": "..." }}"""
