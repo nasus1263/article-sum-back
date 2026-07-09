@@ -21,6 +21,11 @@ CLAUDE_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
 MAX_TOKENS = 1024 * 10
 TIMEOUT_S = 60.0
 
+OPENAI_BASE = "https://api.openai.com/v1"
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+EMBEDDING_MODEL = "text-embedding-3-small"
+EMBED_TRUNCATE_CHARS = 6000
+
 TRAFILATURA_CONFIG = use_config()
 TRAFILATURA_CONFIG.set("DEFAULT", "DOWNLOAD_TIMEOUT", "10")
 
@@ -69,6 +74,8 @@ class ProcessResponse(BaseModel):
     category: str | None = None
     summary: str | None = None
     error: str | None = None
+    embedding: list[float] | None = None
+    embeddingError: str | None = None
 
 
 class SummarizeRequest(BaseModel):
@@ -158,6 +165,19 @@ def extract_json(raw: str, categories: list[str]) -> dict:
     return parsed
 
 
+async def embed_text(text: str) -> list[float]:
+    async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
+        res = await client.post(
+            f"{OPENAI_BASE}/embeddings",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {OPENAI_API_KEY}"},
+            json={"model": EMBEDDING_MODEL, "input": text},
+        )
+        if res.status_code != 200:
+            raise RuntimeError(f"OpenAI embeddings {res.status_code}: {res.text}")
+        data = res.json()
+        return data["data"][0]["embedding"]
+
+
 async def call_claude(system_prompt: str, article: str) -> str:
     async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
         res = await client.post(
@@ -178,15 +198,27 @@ async def process(req: ProcessRequest) -> ProcessResponse:
         return ProcessResponse(success=False)
 
     text, title, image, images = crawled["text"], crawled.get("title"), crawled.get("image"), crawled.get("images")
+
+    embedding = None
+    embedding_error = None
+    try:
+        embedding = await embed_text(text[:EMBED_TRUNCATE_CHARS])
+    except Exception as e:
+        embedding_error = str(e)
+
     try:
         system_prompt = build_summary_system_prompt(req.options, req.categories)
         raw = await call_claude(system_prompt, text)
         parsed = extract_json(raw, req.categories)
     except Exception as e:
-        return ProcessResponse(success=True, text=text, title=title, image=image, images=images, error=str(e))
+        return ProcessResponse(
+            success=True, text=text, title=title, image=image, images=images, error=str(e),
+            embedding=embedding, embeddingError=embedding_error,
+        )
 
     return ProcessResponse(
-        success=True, text=text, title=title, image=image, images=images, category=parsed["category"], summary=parsed["summary"]
+        success=True, text=text, title=title, image=image, images=images, category=parsed["category"], summary=parsed["summary"],
+        embedding=embedding, embeddingError=embedding_error,
     )
 
 
